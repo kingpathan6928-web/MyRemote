@@ -1,0 +1,36 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Values are supplied through gradle.properties or -P command-line properties.
+def appName = providers.gradleProperty('APP_NAME').getOrElse('MyRemote App')
+def applicationIdValue = providers.gradleProperty('APPLICATION_ID').getOrElse('com.myremote.generatedapp')
+def startUrl = providers.gradleProperty('START_URL').getOrElse('https://example.com/')
+
+if (!(startUrl ==~ /^https:\/\/.+/)) {
+    throw new GradleException('START_URL must use HTTPS.')
+}
+if (!(applicationIdValue ==~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/)) {
+    throw new GradleException('APPLICATION_ID must be a valid Android application ID, e.g. com.example.myapp.')
+}
+
+android {
+    namespace 'com.myremote.template'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId applicationIdValue
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        buildConfigField 'String', 'START_URL', '\"' + startUrl.replace('\\', '\\\\').replace('"', '\\"') + '\"'
+        resValue 'string', 'app_name', appName
+    }
+
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
