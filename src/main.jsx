@@ -215,7 +215,8 @@ function App() {
           body: {
             app_name: appName.trim(),
             application_id: pkg.trim(),
-            start_url: website.href
+            start_url: website.href,
+            icon_path: iconUrl || ""
           }
         }
       );
