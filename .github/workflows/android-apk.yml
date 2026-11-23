@@ -1,4 +1,3 @@
-
 name: Build MyRemote Android APK
 
 on:
@@ -19,6 +18,10 @@ on:
         required: true
         default: 'https://example.com/'
         type: string
+      icon_url:
+        description: 'Temporary app icon URL'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +29,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -57,14 +61,89 @@ jobs:
             echo 'start_url must be a valid-looking HTTPS URL.' >&2
             exit 1
           fi
+
           if [[ ! "$APPLICATION_ID" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ ]]; then
             echo 'application_id is not a valid Android application ID.' >&2
             exit 1
           fi
+
           if [[ -z "$APP_NAME" ]]; then
             echo 'app_name cannot be empty.' >&2
             exit 1
           fi
+
+      - name: Install image processing library
+        run: python3 -m pip install Pillow
+
+      - name: Download app icon
+        env:
+          ICON_URL: ${{ inputs.icon_url }}
+        run: |
+          if [[ -n "$ICON_URL" ]]; then
+            python3 -c 'import os,sys,urllib.parse; u=urllib.parse.urlparse(os.environ["ICON_URL"]); sys.exit(0 if u.scheme=="https" and u.hostname=="dvgsamumziqriwcbopam.supabase.co" and u.path.startswith("/storage/v1/object/sign/app-assets/") else 1)' || {
+              echo "Invalid icon URL."
+              exit 1
+            }
+            curl --fail --silent --show-error --location \
+              "$ICON_URL" -o /tmp/myremote-icon
+          else
+            echo "No custom icon supplied. A default icon will be generated."
+          fi
+
+      - name: Generate Android launcher icons
+        run: |
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont
+          from pathlib import Path
+          import os
+
+          source = Path("/tmp/myremote-icon")
+          output = Path("android-webview-template/app/src/main/res")
+
+          if source.exists():
+              try:
+                  original = Image.open(source).convert("RGBA")
+                  original.thumbnail((768, 768), Image.Resampling.LANCZOS)
+              except Exception as e:
+                  raise SystemExit(f"Invalid icon image: {e}")
+
+              canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
+              x = (1024 - original.width) // 2
+              y = (1024 - original.height) // 2
+              canvas.alpha_composite(original, (x, y))
+          else:
+              canvas = Image.new("RGBA", (1024, 1024), (35, 90, 200, 255))
+              draw = ImageDraw.Draw(canvas)
+              try:
+                  font = ImageFont.truetype("DejaVuSans-Bold.ttf", 560)
+              except OSError:
+                  font = ImageFont.load_default()
+              box = draw.textbbox((0, 0), "M", font=font)
+              tw, th = box[2] - box[0], box[3] - box[1]
+              draw.text(
+                  ((1024 - tw) / 2 - box[0], (1024 - th) / 2 - box[1]),
+                  "M",
+                  fill="white",
+                  font=font
+              )
+
+          densities = {
+              "mdpi": 48,
+              "hdpi": 72,
+              "xhdpi": 96,
+              "xxhdpi": 144,
+              "xxxhdpi": 192,
+          }
+
+          for density, size in densities.items():
+              folder = output / f"mipmap-{density}"
+              folder.mkdir(parents=True, exist_ok=True)
+              icon = canvas.resize((size, size), Image.Resampling.LANCZOS)
+              icon.save(folder / "ic_launcher.png", "PNG")
+              icon.save(folder / "ic_launcher_round.png", "PNG")
+
+          print("Android launcher icons generated successfully.")
+          PY
 
       - name: Build debug APK
         working-directory: android-webview-template
