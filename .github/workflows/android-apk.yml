@@ -157,6 +157,39 @@ jobs:
           -PAPPLICATION_ID="$APPLICATION_ID"
           -PSTART_URL="$START_URL"
 
+      - name: Upload APK to private Supabase storage
+        id: supabase_upload
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find android-webview-template/app/build/outputs/apk/debug -type f -name "*.apk" -print -quit)"
+          if [[ -z "$APK_PATH" ]]; then
+            echo "No APK file was found after the build." >&2
+            exit 1
+          fi
+
+          BUILD_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          STORAGE_PATH="builds/${BUILD_ID}.apk"
+          STORAGE_URL="${SUPABASE_URL%/}/storage/v1/object/apk-builds/${STORAGE_PATH}"
+
+          curl --fail --silent --show-error --location --request POST "$STORAGE_URL" \
+            --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            --header "Content-Type: application/vnd.android.package-archive" \
+            --header "x-upsert: true" \
+            --data-binary "@${APK_PATH}"
+
+          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
+          echo "apk_path=${STORAGE_PATH}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## APK uploaded"
+            echo "- Build ID: \`${BUILD_ID}\`"
+            echo "- Private bucket: \`apk-builds\`"
+            echo "- APK path: \`${STORAGE_PATH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
