@@ -18,6 +18,111 @@ const permissions = [
   { id: 'notifications', label: 'Notifications', desc: 'App notifications where supported', Icon: Bell }
 ];
 
+// SVG ko restricted shapes aur attributes tak limit karte hain.
+const sanitizeSvg = (source) => {
+  if (!source || source.length > 100000) {
+    throw new Error('SVG code 100 KB se chhota hona chahiye.');
+  }
+
+  const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
+  const root = doc.documentElement;
+
+  if (doc.querySelector('parsererror') || root.localName !== 'svg') {
+    throw new Error('Valid SVG code paste karein.');
+  }
+
+  const tags = new Set([
+    'svg', 'g', 'path', 'rect', 'circle', 'ellipse',
+    'line', 'polyline', 'polygon'
+  ]);
+
+  const attrs = new Set([
+    'xmlns', 'viewBox', 'width', 'height', 'fill',
+    'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap',
+    'stroke-linejoin', 'opacity', 'fill-opacity',
+    'stroke-opacity', 'transform', 'd', 'x', 'y',
+    'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r',
+    'rx', 'ry', 'points'
+  ]);
+
+  const clean = (node) => {
+    [...node.children].forEach((child) => {
+      if (!tags.has(child.localName)) {
+        child.remove();
+        return;
+      }
+
+      [...child.attributes].forEach((attr) => {
+        const name = attr.name;
+        const value = attr.value.trim();
+
+        if (
+          !attrs.has(name) ||
+          /^on/i.test(name) ||
+          /url\s*\(|javascript:|https?:|data:/i.test(value)
+        ) {
+          child.removeAttribute(name);
+        }
+      });
+
+      clean(child);
+    });
+  };
+
+  clean(root);
+  root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+  if (!root.getAttribute('viewBox')) {
+    const w = Number(root.getAttribute('width')) || 512;
+    const h = Number(root.getAttribute('height')) || 512;
+    root.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  }
+
+  return new XMLSerializer().serializeToString(root);
+};
+
+const svgToPng = async (source) => {
+  const safeSvg = sanitizeSvg(source);
+  const blob = new Blob([safeSvg], { type: 'image/svg+xml' });
+  const objectUrl = URL.createObjectURL(blob);
+
+  try {
+    const img = new window.Image();
+    img.src = objectUrl;
+
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('SVG preview nahi ban paya. Code check karein.'));
+    });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+
+    const ctx = canvas.getContext('2d');
+    const scale = Math.min(512 / img.width, 512 / img.height);
+    const width = img.width * scale;
+    const height = img.height * scale;
+
+    ctx.drawImage(
+      img,
+      (512 - width) / 2,
+      (512 - height) / 2,
+      width,
+      height
+    );
+
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob((png) => {
+        if (png) resolve(png);
+        else reject(new Error('SVG ko PNG mein convert nahi kar paye.'));
+      }, 'image/png');
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+};
+
 function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -43,6 +148,7 @@ function App() {
 
   const [iconFile, setIconFile] = useState(null);
   const [iconPreview, setIconPreview] = useState('');
+  const [iconSvg, setIconSvg] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -175,20 +281,37 @@ function App() {
       return;
     }
 
+    if (iconSvg.trim()) {
+      try {
+        sanitizeSvg(iconSvg);
+      } catch (err) {
+        showNotice(err.message, 'error');
+        return;
+      }
+    }
+
     setSaving(true);
 
     try {
       let iconUrl = null;
+      let uploadIcon = iconFile;
 
-      if (iconFile) {
-        const safeName = iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+      if (iconSvg.trim()) {
+        uploadIcon = await svgToPng(iconSvg);
+      }
+
+      if (uploadIcon) {
+        const safeName = iconFile
+          ? iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '-')
+          : 'custom-svg-icon.png';
+
         const path = `${user.id}/${Date.now()}-${safeName}`;
 
         const { error: uploadError } = await supabase.storage
           .from('app-assets')
-          .upload(path, iconFile, {
+          .upload(path, uploadIcon, {
             upsert: false,
-            contentType: iconFile.type
+            contentType: iconSvg.trim() ? 'image/png' : iconFile.type
           });
 
         if (uploadError) throw uploadError;
@@ -216,7 +339,7 @@ function App() {
             app_name: appName.trim(),
             application_id: pkg.trim(),
             start_url: website.href,
-            icon_path: iconUrl || ""
+            icon_path: iconUrl || ''
           }
         }
       );
@@ -507,7 +630,7 @@ function App() {
                       : 'M'}
                   </div>
                   <div className="uploadcopy">
-                    <b>{iconFile?.name || 'Custom app icon'}</b>
+                    <b>{iconSvg.trim() ? 'SVG code icon' : (iconFile?.name || 'Custom app icon')}</b>
                     <small>PNG or JPEG · 512 × 512 px recommended</small>
                   </div>
                   <label className="uploadbtn">
@@ -520,12 +643,45 @@ function App() {
                         const file = e.target.files?.[0];
                         if (file) {
                           setIconFile(file);
+                          setIconSvg('');
                           setIconPreview(URL.createObjectURL(file));
                         }
                       }}
                     />
                   </label>
                 </div>
+
+                <label htmlFor="svg-icon-code">Or paste SVG code</label>
+                <textarea
+                  id="svg-icon-code"
+                  className="field"
+                  rows={3}
+                  value={iconSvg}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setIconSvg(value);
+
+                    if (value.trim()) {
+                      setIconFile(null);
+                      try {
+                        const safe = sanitizeSvg(value);
+                        setIconPreview(
+                          'data:image/svg+xml;charset=utf-8,' +
+                          encodeURIComponent(safe)
+                        );
+                      } catch {
+                        setIconPreview('');
+                      }
+                    } else {
+                      setIconPreview('');
+                    }
+                  }}
+                  placeholder="<svg viewBox=&quot;0 0 512 512&quot;>...</svg>"
+                  aria-label="Paste SVG icon code"
+                />
+                <small className="authfoot">
+                  SVG paste karte hi preview dikhega. Safe SVG shapes supported hain.
+                </small>
 
                 <div className="permissionhead">
                   <div>
