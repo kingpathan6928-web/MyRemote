@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import {
   LayoutDashboard, Smartphone, Image, History, Settings, Sun, Moon,
   Globe, Camera, Mic, MapPin, Bell, FolderOpen, Upload, ArrowRight,
-  CheckCircle2, LogOut, Mail, Lock, User, LoaderCircle
+  CheckCircle2, LogOut, Mail, Lock, User, LoaderCircle, Download, RefreshCw
 } from 'lucide-react';
 import { supabase } from './supabase';
 import './style.css';
@@ -150,6 +150,9 @@ function App() {
   const [iconPreview, setIconPreview] = useState('');
   const [iconSvg, setIconSvg] = useState('');
   const [saving, setSaving] = useState(false);
+  const [builds, setBuilds] = useState([]);
+  const [activeBuildId, setActiveBuildId] = useState(null);
+  const [downloadBusy, setDownloadBusy] = useState(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -170,6 +173,32 @@ function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const loadBuilds = async () => {
+    if (!supabase || !user) return;
+    const { data, error } = await supabase.from('builds').select('id,project_id,status,progress,apk_url,storage_path,error_message,created_at,started_at,completed_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(20);
+    if (!error) setBuilds(data || []);
+  };
+
+  useEffect(() => { if (user) loadBuilds(); else setBuilds([]); }, [user, tab]);
+
+  useEffect(() => {
+    if (!user || !builds.some((build) => ['queued', 'building', 'uploading'].includes(build.status))) return undefined;
+    const timer = window.setInterval(loadBuilds, 4000);
+    return () => window.clearInterval(timer);
+  }, [user, builds]);
+
+  const downloadApk = async (build) => {
+    if (!supabase || !build.storage_path || build.status !== 'completed') return;
+    setDownloadBusy(build.id);
+    try {
+      const { data, error } = await supabase.storage.from('apk-builds').createSignedUrl(build.storage_path, 300);
+      if (error) throw error;
+      if (!data?.signedUrl) throw new Error('Download link was not created.');
+      window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) { showNotice(`Download failed: ${err.message || 'Please try again.'}`, 'error'); }
+    finally { setDownloadBusy(null); }
+  };
 
   const showNotice = (message, type = 'info') => {
     setNotice(message);
@@ -318,7 +347,7 @@ function App() {
         iconUrl = path;
       }
 
-      const { error: saveError } = await supabase
+      const { data: project, error: saveError } = await supabase
         .from('projects')
         .insert({
           user_id: user.id,
@@ -326,16 +355,20 @@ function App() {
           package_name: pkg.trim(),
           website_url: website.href,
           icon_url: iconUrl
-        });
+        }).select('id').single();
 
       if (saveError) throw saveError;
-
-      showNotice('Your app setup has been saved. Preparing your APK build…');
+      const { data: build, error: createBuildError } = await supabase.from('builds').insert({ user_id: user.id, project_id: project.id, status: 'queued', progress: 5 }).select('id').single();
+      if (createBuildError) throw createBuildError;
+      setActiveBuildId(build.id);
+      await loadBuilds();
+      showNotice('Your app setup is saved. APK build is queued and live progress will appear below.');
 
       const { data, error: buildError } = await supabase.functions.invoke(
         'build-apk',
         {
           body: {
+            build_id: build.id,
             app_name: appName.trim(),
             application_id: pkg.trim(),
             start_url: website.href,
@@ -350,10 +383,8 @@ function App() {
         throw new Error(data?.error || 'Unable to start the build.');
       }
 
-      showNotice(
-        'Your app setup has been submitted successfully. Your APK build request is in the queue.',
-        'success'
-      );
+      await loadBuilds();
+      showNotice('Build request sent. Track the genuine workflow progress in Build History.', 'success');
     } catch (err) {
       showNotice(
         `We couldn't complete your request: ${err.message || 'Please try again.'}`,
@@ -776,11 +807,7 @@ function App() {
                   <p>Your generated APK records will appear here.</p>
                 </div>
               </div>
-              <div className="panel empty">
-                <History size={32} />
-                <h2>No builds yet</h2>
-                <p>Your build records will appear here when build history is connected.</p>
-              </div>
+              {builds.length === 0 ? <div className="panel empty"><History size={32} /><h2>No builds yet</h2><p>Your build records will appear here after you submit an APK.</p></div> : <div className="buildlist">{builds.map((build) => { const status = build.status || 'queued'; const label = status === 'completed' ? 'Ready to download' : status === 'failed' ? 'Build failed' : status === 'uploading' ? 'Uploading APK' : status === 'building' ? 'Building APK' : 'Queued'; return <article className="buildcard" key={build.id}><div className="buildtop"><div><b>{build.project_id ? 'Android APK build' : 'APK build'}</b><small>{new Date(build.created_at).toLocaleString()}</small></div><span className={`buildstatus ${status}`}>{label}</span></div><div className="progressrow"><div className="progressbar"><i style={{ width: `${Math.max(0, Math.min(100, build.progress || 0))}%` }} /></div><strong>{build.progress || 0}%</strong></div>{build.error_message && <p className="builderror">{build.error_message}</p>}{status === 'completed' && build.storage_path && <button className="downloadbtn" onClick={() => downloadApk(build)} disabled={downloadBusy === build.id}>{downloadBusy === build.id ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />} Download private APK</button>}</article>; })}</div>}
             </>
           ) : tab === 'settings' ? (
             <>

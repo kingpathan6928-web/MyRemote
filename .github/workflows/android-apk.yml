@@ -3,23 +3,28 @@ name: Build MyRemote Android APK
 on:
   workflow_dispatch:
     inputs:
+      build_id:
+        description: 'Supabase builds row UUID'
+        required: true
+        type: string
+      user_id:
+        description: 'Authenticated Supabase user UUID'
+        required: true
+        type: string
       app_name:
         description: 'Name shown under the app icon'
         required: true
-        default: 'MyRemote Test App'
         type: string
       application_id:
         description: 'Unique Android package ID'
         required: true
-        default: 'com.myremote.generatedapp'
         type: string
       start_url:
         description: 'HTTPS website URL to open in the app'
         required: true
-        default: 'https://example.com/'
         type: string
-      icon_url:
-        description: 'Temporary app icon URL'
+      icon_path:
+        description: 'Private app-assets object path'
         required: false
         type: string
 
@@ -29,122 +34,71 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    env:
+      BUILD_ID: ${{ inputs.build_id }}
+      USER_ID: ${{ inputs.user_id }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-
       - name: Install Android SDK Platform 35
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-
+      - name: Mark runner ready
+        run: |
+          curl --fail --silent --show-error --request PATCH "${SUPABASE_URL%/}/rest/v1/builds?id=eq.${BUILD_ID}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --data '{"status":"building","progress":20,"github_run_id":'"${GITHUB_RUN_ID}"'}'
       - name: Validate inputs
         env:
           APP_NAME: ${{ inputs.app_name }}
           APPLICATION_ID: ${{ inputs.application_id }}
           START_URL: ${{ inputs.start_url }}
         run: |
-          if [[ ! "$START_URL" =~ ^https://[^[:space:]]+$ ]]; then
-            echo 'start_url must be a valid-looking HTTPS URL.' >&2
-            exit 1
-          fi
-
-          if [[ ! "$APPLICATION_ID" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ ]]; then
-            echo 'application_id is not a valid Android application ID.' >&2
-            exit 1
-          fi
-
-          if [[ -z "$APP_NAME" ]]; then
-            echo 'app_name cannot be empty.' >&2
-            exit 1
-          fi
-
+          if [[ ! "$START_URL" =~ ^https://[^[:space:]]+$ ]]; then echo 'start_url must be HTTPS.' >&2; exit 1; fi
+          if [[ ! "$APPLICATION_ID" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ ]]; then echo 'Invalid application ID.' >&2; exit 1; fi
+          if [[ -z "$APP_NAME" ]]; then echo 'app_name cannot be empty.' >&2; exit 1; fi
+          if [[ ! "$BUILD_ID" =~ ^[0-9a-fA-F-]{36}$ || ! "$USER_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then echo 'Invalid build or user ID.' >&2; exit 1; fi
       - name: Install image processing library
         run: python3 -m pip install Pillow
-
       - name: Download app icon
         env:
-          ICON_URL: ${{ inputs.icon_url }}
+          ICON_PATH: ${{ inputs.icon_path }}
         run: |
-          if [[ -n "$ICON_URL" ]]; then
-            python3 -c 'import os,sys,urllib.parse; u=urllib.parse.urlparse(os.environ["ICON_URL"]); sys.exit(0 if u.scheme=="https" and u.hostname=="dvgsamumziqriwcbopam.supabase.co" and u.path.startswith("/storage/v1/object/sign/app-assets/") else 1)' || {
-              echo "Invalid icon URL."
-              exit 1
-            }
-            curl --fail --silent --show-error --location \
-              "$ICON_URL" -o /tmp/myremote-icon
-          else
-            echo "No custom icon supplied. A default icon will be generated."
+          if [[ -n "$ICON_PATH" ]]; then
+            if [[ "$ICON_PATH" != "${USER_ID}/"* || "$ICON_PATH" == *..* ]]; then echo 'Invalid icon path.' >&2; exit 1; fi
+            curl --fail --silent --show-error --location "${SUPABASE_URL%/}/storage/v1/object/app-assets/${ICON_PATH}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" -o /tmp/myremote-icon
           fi
-
       - name: Generate Android launcher icons
         run: |
           python3 - <<'PY'
           from PIL import Image, ImageDraw, ImageFont
           from pathlib import Path
-          import os
-
-          source = Path("/tmp/myremote-icon")
-          output = Path("android-webview-template/app/src/main/res")
-
+          source=Path('/tmp/myremote-icon'); output=Path('android-webview-template/app/src/main/res')
           if source.exists():
-              try:
-                  original = Image.open(source).convert("RGBA")
-                  original.thumbnail((768, 768), Image.Resampling.LANCZOS)
-              except Exception as e:
-                  raise SystemExit(f"Invalid icon image: {e}")
-
-              canvas = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
-              x = (1024 - original.width) // 2
-              y = (1024 - original.height) // 2
-              canvas.alpha_composite(original, (x, y))
+              try: original=Image.open(source).convert('RGBA'); original.thumbnail((768,768),Image.Resampling.LANCZOS)
+              except Exception as e: raise SystemExit(f'Invalid icon image: {e}')
+              canvas=Image.new('RGBA',(1024,1024),(0,0,0,0)); canvas.alpha_composite(original,((1024-original.width)//2,(1024-original.height)//2))
           else:
-              canvas = Image.new("RGBA", (1024, 1024), (35, 90, 200, 255))
-              draw = ImageDraw.Draw(canvas)
-              try:
-                  font = ImageFont.truetype("DejaVuSans-Bold.ttf", 560)
-              except OSError:
-                  font = ImageFont.load_default()
-              box = draw.textbbox((0, 0), "M", font=font)
-              tw, th = box[2] - box[0], box[3] - box[1]
-              draw.text(
-                  ((1024 - tw) / 2 - box[0], (1024 - th) / 2 - box[1]),
-                  "M",
-                  fill="white",
-                  font=font
-              )
-
-          densities = {
-              "mdpi": 48,
-              "hdpi": 72,
-              "xhdpi": 96,
-              "xxhdpi": 144,
-              "xxxhdpi": 192,
-          }
-
-          for density, size in densities.items():
-              folder = output / f"mipmap-{density}"
-              folder.mkdir(parents=True, exist_ok=True)
-              icon = canvas.resize((size, size), Image.Resampling.LANCZOS)
-              icon.save(folder / "ic_launcher.png", "PNG")
-              icon.save(folder / "ic_launcher_round.png", "PNG")
-
-          print("Android launcher icons generated successfully.")
+              canvas=Image.new('RGBA',(1024,1024),(35,90,200,255)); draw=ImageDraw.Draw(canvas)
+              try: font=ImageFont.truetype('DejaVuSans-Bold.ttf',560)
+              except OSError: font=ImageFont.load_default()
+              box=draw.textbbox((0,0),'M',font=font); draw.text(((1024-box[2]+box[0])/2,(1024-box[3]+box[1])/2),'M',fill='white',font=font)
+          for density,size in {'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}.items():
+              folder=output/f'mipmap-{density}'; folder.mkdir(parents=True,exist_ok=True); icon=canvas.resize((size,size),Image.Resampling.LANCZOS); icon.save(folder/'ic_launcher.png'); icon.save(folder/'ic_launcher_round.png')
           PY
-
+      - name: Mark Android resources ready
+        run: |
+          curl --fail --silent --show-error --request PATCH "${SUPABASE_URL%/}/rest/v1/builds?id=eq.${BUILD_ID}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --data '{"status":"building","progress":45}'
       - name: Build debug APK
         working-directory: android-webview-template
         env:
@@ -152,44 +106,20 @@ jobs:
           APPLICATION_ID: ${{ inputs.application_id }}
           START_URL: ${{ inputs.start_url }}
         run: >-
-          gradle assembleDebug
-          -PAPP_NAME="$APP_NAME"
-          -PAPPLICATION_ID="$APPLICATION_ID"
-          -PSTART_URL="$START_URL"
-
+          gradle assembleDebug -PAPP_NAME="$APP_NAME" -PAPPLICATION_ID="$APPLICATION_ID" -PSTART_URL="$START_URL"
+      - name: Mark APK built
+        run: |
+          curl --fail --silent --show-error --request PATCH "${SUPABASE_URL%/}/rest/v1/builds?id=eq.${BUILD_ID}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --data '{"status":"uploading","progress":80}'
       - name: Upload APK to private Supabase storage
-        id: supabase_upload
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
-          APK_PATH="$(find android-webview-template/app/build/outputs/apk/debug -type f -name "*.apk" -print -quit)"
-          if [[ -z "$APK_PATH" ]]; then
-            echo "No APK file was found after the build." >&2
-            exit 1
-          fi
-
-          BUILD_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          STORAGE_PATH="builds/${BUILD_ID}.apk"
-          STORAGE_URL="${SUPABASE_URL%/}/storage/v1/object/apk-builds/${STORAGE_PATH}"
-
-          curl --fail --silent --show-error --location --request POST "$STORAGE_URL" \
-            --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-            --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
-            --header "Content-Type: application/vnd.android.package-archive" \
-            --header "x-upsert: true" \
-            --data-binary "@${APK_PATH}"
-
-          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
-          echo "apk_path=${STORAGE_PATH}" >> "$GITHUB_OUTPUT"
-          {
-            echo "## APK uploaded"
-            echo "- Build ID: \`${BUILD_ID}\`"
-            echo "- Private bucket: \`apk-builds\`"
-            echo "- APK path: \`${STORAGE_PATH}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          APK_PATH="$(find android-webview-template/app/build/outputs/apk/debug -type f -name '*.apk' -print -quit)"
+          [[ -n "$APK_PATH" ]] || { echo 'No APK file found.' >&2; exit 1; }
+          STORAGE_PATH="${USER_ID}/${BUILD_ID}.apk"
+          curl --fail --silent --show-error --location --request POST "${SUPABASE_URL%/}/storage/v1/object/apk-builds/${STORAGE_PATH}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/vnd.android.package-archive' --header 'x-upsert: true' --data-binary "@${APK_PATH}"
+          curl --fail --silent --show-error --request PATCH "${SUPABASE_URL%/}/rest/v1/builds?id=eq.${BUILD_ID}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --data '{"status":"completed","progress":100,"storage_path":"'"${STORAGE_PATH}"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+          echo "## APK uploaded successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Private path: \\`${STORAGE_PATH}\\`" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -197,3 +127,7 @@ jobs:
           path: android-webview-template/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+      - name: Mark build failed
+        if: failure()
+        run: |
+          curl --silent --show-error --request PATCH "${SUPABASE_URL%/}/rest/v1/builds?id=eq.${BUILD_ID}" --header "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" --header "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --data '{"status":"failed","error_message":"GitHub Actions failed while building or uploading the APK."}' || true
