@@ -1,5 +1,4 @@
-
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   LayoutDashboard, Smartphone, Image, History, Settings, Sun, Moon,
@@ -21,7 +20,6 @@ const permissions = [
 function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
-
   const [authMode, setAuthMode] = useState('signup');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -32,18 +30,22 @@ function App() {
   const [tab, setTab] = useState('builder');
   const [theme, setTheme] = useState('dark');
   const [mode, setMode] = useState('fast');
-
   const [url, setUrl] = useState('');
   const [appName, setAppName] = useState('My Website');
   const [pkg, setPkg] = useState('com.example.mywebsite');
-
   const [selected, setSelected] = useState([]);
   const [notice, setNotice] = useState('');
   const [noticeType, setNoticeType] = useState('info');
-
   const [iconFile, setIconFile] = useState(null);
   const [iconPreview, setIconPreview] = useState('');
+  const [iconZoom, setIconZoom] = useState(1);
+  const [iconRotation, setIconRotation] = useState(0);
+  const [iconOffset, setIconOffset] = useState({ x: 0, y: 0 });
+  const [iconBg, setIconBg] = useState('transparent');
   const [saving, setSaving] = useState(false);
+
+  const cropRef = useRef(null);
+  const dragRef = useRef(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -76,6 +78,117 @@ function App() {
         ? current.filter((item) => item !== id)
         : [...current, id]
     );
+  };
+
+  const resetIconEditor = () => {
+    setIconZoom(1);
+    setIconRotation(0);
+    setIconOffset({ x: 0, y: 0 });
+    setIconBg('transparent');
+  };
+
+  const chooseIcon = (file) => {
+    if (!file) return;
+
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      showNotice('Please choose a PNG, JPEG, or WebP image.', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      setIconPreview(String(reader.result));
+      setIconFile(file);
+      resetIconEditor();
+    };
+
+    reader.onerror = () => {
+      showNotice('Could not read this image. Please try another.', 'error');
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const startIconDrag = (e) => {
+    if (!iconPreview) return;
+
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    dragRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      ox: iconOffset.x,
+      oy: iconOffset.y
+    };
+  };
+
+  const moveIconDrag = (e) => {
+    if (!dragRef.current || !cropRef.current) return;
+
+    const rect = cropRef.current.getBoundingClientRect();
+    const factor = 220 / Math.min(rect.width, rect.height);
+
+    setIconOffset({
+      x: dragRef.current.ox + (e.clientX - dragRef.current.x) * factor,
+      y: dragRef.current.oy + (e.clientY - dragRef.current.y) * factor
+    });
+  };
+
+  const stopIconDrag = () => {
+    dragRef.current = null;
+  };
+
+  const makeEditedIcon = async () => {
+    if (!iconPreview) return null;
+
+    const img = new window.Image();
+    img.src = iconPreview;
+
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Could not process the selected icon.'));
+    });
+
+    const size = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+      throw new Error('Your browser could not prepare the icon.');
+    }
+
+    if (iconBg !== 'transparent') {
+      ctx.fillStyle = iconBg;
+      ctx.fillRect(0, 0, size, size);
+    }
+
+    const base = Math.max(size / img.width, size / img.height);
+
+    ctx.translate(
+      size / 2 + iconOffset.x * (size / 220),
+      size / 2 + iconOffset.y * (size / 220)
+    );
+
+    ctx.rotate((iconRotation * Math.PI) / 180);
+    ctx.scale(base * iconZoom, base * iconZoom);
+    ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, 'image/png');
+    });
+
+    if (!blob) {
+      throw new Error('Could not export the edited icon.');
+    }
+
+    return new File([blob], 'myremote-icon.png', {
+      type: 'image/png'
+    });
   };
 
   const authSubmit = async (e) => {
@@ -165,30 +278,20 @@ function App() {
       return;
     }
 
-    if (iconFile && !['image/png', 'image/jpeg'].includes(iconFile.type)) {
-      showNotice('Please choose a PNG or JPEG icon.', 'error');
-      return;
-    }
-
-    if (iconFile && iconFile.size > 5 * 1024 * 1024) {
-      showNotice('Icon size must be less than 5 MB.', 'error');
-      return;
-    }
-
     setSaving(true);
 
     try {
       let iconUrl = null;
+      const uploadIcon = iconPreview ? await makeEditedIcon() : null;
 
-      if (iconFile) {
-        const safeName = iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '-');
-        const path = `${user.id}/${Date.now()}-${safeName}`;
+      if (uploadIcon) {
+        const path = `${user.id}/${Date.now()}-myremote-icon.png`;
 
         const { error: uploadError } = await supabase.storage
           .from('app-assets')
-          .upload(path, iconFile, {
+          .upload(path, uploadIcon, {
             upsert: false,
-            contentType: iconFile.type
+            contentType: 'image/png'
           });
 
         if (uploadError) throw uploadError;
@@ -216,7 +319,7 @@ function App() {
             app_name: appName.trim(),
             application_id: pkg.trim(),
             start_url: website.href,
-            icon_path: iconUrl || ""
+            icon_path: iconUrl || ''
           }
         }
       );
@@ -318,8 +421,7 @@ function App() {
           {authMessage && <div className="notice">{authMessage}</div>}
 
           <p className="authswitch">
-            {authMode === 'signup' ? 'Already have an account?' : 'New to MyRemote?'}
-            {' '}
+            {authMode === 'signup' ? 'Already have an account?' : 'New to MyRemote?'}{' '}
             <button
               type="button"
               onClick={() => {
@@ -499,32 +601,140 @@ function App() {
                   </div>
                 </div>
 
-                <label>App icon</label>
-                <div className="iconupload">
-                  <div className="appicon">
-                    {iconPreview
-                      ? <img src={iconPreview} alt="App icon preview" />
-                      : 'M'}
+                <label>App icon editor</label>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'minmax(0, 220px) minmax(0, 1fr)',
+                  gap: 18,
+                  alignItems: 'center',
+                  padding: 14,
+                  border: '1px solid var(--line)',
+                  borderRadius: 12,
+                  background: 'var(--bg)'
+                }}>
+                  <div
+                    ref={cropRef}
+                    onPointerDown={startIconDrag}
+                    onPointerMove={moveIconDrag}
+                    onPointerUp={stopIconDrag}
+                    onPointerCancel={stopIconDrag}
+                    onLostPointerCapture={stopIconDrag}
+                    style={{
+                      width: '100%',
+                      maxWidth: 220,
+                      aspectRatio: '1',
+                      position: 'relative',
+                      overflow: 'hidden',
+                      borderRadius: 14,
+                      border: '1px solid var(--line)',
+                      background: iconBg,
+                      touchAction: 'none',
+                      cursor: 'grab',
+                      display: 'grid',
+                      placeItems: 'center'
+                    }}
+                  >
+                    {iconPreview ? (
+                      <img
+                        src={iconPreview}
+                        alt="App icon crop preview"
+                        draggable="false"
+                        style={{
+                          position: 'absolute',
+                          width: '100%',
+                          height: '100%',
+                          objectFit: 'cover',
+                          maxWidth: 'none',
+                          maxHeight: 'none',
+                          pointerEvents: 'none',
+                          userSelect: 'none',
+                          transform: `translate(${iconOffset.x}px, ${iconOffset.y}px) scale(${iconZoom}) rotate(${iconRotation}deg)`
+                        }}
+                      />
+                    ) : (
+                      <span style={{ fontSize: 64, fontWeight: 800, color: 'var(--orange)' }}>M</span>
+                    )}
+                    <span style={{
+                      position: 'absolute',
+                      inset: 0,
+                      border: '1px solid #ff9d4e',
+                      pointerEvents: 'none'
+                    }} />
                   </div>
-                  <div className="uploadcopy">
-                    <b>{iconFile?.name || 'Custom app icon'}</b>
-                    <small>PNG or JPEG · 512 × 512 px recommended</small>
-                  </div>
-                  <label className="uploadbtn">
-                    <Upload size={15} /> Choose icon
+
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div className="uploadcopy" style={{ flex: 1 }}>
+                        <b>{iconFile?.name || 'Choose an app icon'}</b>
+                        <small>PNG, JPEG or WebP · Final output 512 × 512 PNG</small>
+                      </div>
+                      <label className="uploadbtn">
+                        <Upload size={15} /> Choose icon
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          hidden
+                          onChange={(e) => {
+                            chooseIcon(e.target.files?.[0]);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    <label htmlFor="icon-zoom" style={{ display: 'block', marginTop: 16 }}>
+                      Zoom · {iconZoom.toFixed(1)}×
+                    </label>
                     <input
-                      type="file"
-                      accept="image/png,image/jpeg"
-                      hidden
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setIconFile(file);
-                          setIconPreview(URL.createObjectURL(file));
-                        }
-                      }}
+                      id="icon-zoom"
+                      type="range"
+                      min="1"
+                      max="3"
+                      step="0.1"
+                      value={iconZoom}
+                      onChange={(e) => setIconZoom(Number(e.target.value))}
+                      style={{ width: '100%', accentColor: 'var(--orange)' }}
                     />
-                  </label>
+
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => setIconRotation((v) => (v + 90) % 360)}
+                      >
+                        ↻ Rotate 90°
+                      </button>
+                      <button type="button" className="secondary" onClick={resetIconEditor}>
+                        Reset
+                      </button>
+                    </div>
+
+                    <label style={{ display: 'block', marginTop: 15 }}>Background</label>
+                    <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                      {['transparent', '#ffffff', '#000000', '#ff8b38'].map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          title={color}
+                          aria-label={`Set icon background ${color}`}
+                          onClick={() => setIconBg(color)}
+                          style={{
+                            width: 29,
+                            height: 29,
+                            borderRadius: '50%',
+                            border: iconBg === color ? '3px solid var(--orange)' : '1px solid var(--line)',
+                            background: color === 'transparent'
+                              ? 'repeating-conic-gradient(#bbb 0% 25%, #fff 0% 50%) 50% / 12px 12px'
+                              : color
+                          }}
+                        />
+                      ))}
+                    </div>
+
+                    <small style={{ display: 'block', marginTop: 12, color: 'var(--muted)' }}>
+                      Drag the image inside the square to adjust its position.
+                    </small>
+                  </div>
                 </div>
 
                 <div className="permissionhead">
