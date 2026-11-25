@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import {
   LayoutDashboard, Smartphone, Image, History, Settings, Sun, Moon,
   Globe, Camera, Mic, MapPin, Bell, FolderOpen, Upload, ArrowRight,
-  CheckCircle2, LogOut, Mail, Lock, User, LoaderCircle, Download, RefreshCw
+  CheckCircle2, LogOut, Mail, Lock, User, LoaderCircle
 } from 'lucide-react';
 import { supabase } from './supabase';
 import './style.css';
@@ -17,111 +17,6 @@ const permissions = [
   { id: 'location', label: 'Location', desc: 'Location features with user consent', Icon: MapPin },
   { id: 'notifications', label: 'Notifications', desc: 'App notifications where supported', Icon: Bell }
 ];
-
-// SVG ko restricted shapes aur attributes tak limit karte hain.
-const sanitizeSvg = (source) => {
-  if (!source || source.length > 100000) {
-    throw new Error('SVG code 100 KB se chhota hona chahiye.');
-  }
-
-  const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
-  const root = doc.documentElement;
-
-  if (doc.querySelector('parsererror') || root.localName !== 'svg') {
-    throw new Error('Valid SVG code paste karein.');
-  }
-
-  const tags = new Set([
-    'svg', 'g', 'path', 'rect', 'circle', 'ellipse',
-    'line', 'polyline', 'polygon'
-  ]);
-
-  const attrs = new Set([
-    'xmlns', 'viewBox', 'width', 'height', 'fill',
-    'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap',
-    'stroke-linejoin', 'opacity', 'fill-opacity',
-    'stroke-opacity', 'transform', 'd', 'x', 'y',
-    'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r',
-    'rx', 'ry', 'points'
-  ]);
-
-  const clean = (node) => {
-    [...node.children].forEach((child) => {
-      if (!tags.has(child.localName)) {
-        child.remove();
-        return;
-      }
-
-      [...child.attributes].forEach((attr) => {
-        const name = attr.name;
-        const value = attr.value.trim();
-
-        if (
-          !attrs.has(name) ||
-          /^on/i.test(name) ||
-          /url\s*\(|javascript:|https?:|data:/i.test(value)
-        ) {
-          child.removeAttribute(name);
-        }
-      });
-
-      clean(child);
-    });
-  };
-
-  clean(root);
-  root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-
-  if (!root.getAttribute('viewBox')) {
-    const w = Number(root.getAttribute('width')) || 512;
-    const h = Number(root.getAttribute('height')) || 512;
-    root.setAttribute('viewBox', `0 0 ${w} ${h}`);
-  }
-
-  return new XMLSerializer().serializeToString(root);
-};
-
-const svgToPng = async (source) => {
-  const safeSvg = sanitizeSvg(source);
-  const blob = new Blob([safeSvg], { type: 'image/svg+xml' });
-  const objectUrl = URL.createObjectURL(blob);
-
-  try {
-    const img = new window.Image();
-    img.src = objectUrl;
-
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error('SVG preview nahi ban paya. Code check karein.'));
-    });
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 512;
-    canvas.height = 512;
-
-    const ctx = canvas.getContext('2d');
-    const scale = Math.min(512 / img.width, 512 / img.height);
-    const width = img.width * scale;
-    const height = img.height * scale;
-
-    ctx.drawImage(
-      img,
-      (512 - width) / 2,
-      (512 - height) / 2,
-      width,
-      height
-    );
-
-    return await new Promise((resolve, reject) => {
-      canvas.toBlob((png) => {
-        if (png) resolve(png);
-        else reject(new Error('SVG ko PNG mein convert nahi kar paye.'));
-      }, 'image/png');
-    });
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-};
 
 function App() {
   const [user, setUser] = useState(null);
@@ -148,11 +43,7 @@ function App() {
 
   const [iconFile, setIconFile] = useState(null);
   const [iconPreview, setIconPreview] = useState('');
-  const [iconSvg, setIconSvg] = useState('');
   const [saving, setSaving] = useState(false);
-  const [builds, setBuilds] = useState([]);
-  const [activeBuildId, setActiveBuildId] = useState(null);
-  const [downloadBusy, setDownloadBusy] = useState(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -174,60 +65,9 @@ function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  const loadBuilds = async () => {
-    if (!supabase || !user) return;
-    const { data, error } = await supabase.from('builds').select('id,project_id,status,progress,apk_url,storage_path,error_message,created_at,started_at,completed_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(20);
-    if (!error) {
-      setBuilds(data || []);
-      setActiveBuildId((current) => current || data?.find((build) => ['queued', 'building', 'uploading'].includes(build.status))?.id || null);
-    }
-  };
-
-  useEffect(() => { if (user) loadBuilds(); else setBuilds([]); }, [user, tab]);
-
-  useEffect(() => {
-    if (!user || !builds.some((build) => ['queued', 'building', 'uploading'].includes(build.status))) return undefined;
-    const timer = window.setInterval(loadBuilds, 4000);
-    return () => window.clearInterval(timer);
-  }, [user, builds]);
-
-  const downloadApk = async (build) => {
-    if (!supabase || !build.storage_path || build.status !== 'completed') return;
-    setDownloadBusy(build.id);
-    try {
-      const { data, error } = await supabase.storage.from('apk-builds').createSignedUrl(build.storage_path, 300);
-      if (error) throw error;
-      if (!data?.signedUrl) throw new Error('Download link was not created.');
-      window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
-    } catch (err) { showNotice(`Download failed: ${err.message || 'Please try again.'}`, 'error'); }
-    finally { setDownloadBusy(null); }
-  };
-
   const showNotice = (message, type = 'info') => {
     setNotice(message);
     setNoticeType(type);
-  };
-
-  const activeBuild = builds.find((build) => build.id === activeBuildId);
-  const renderBuildProgress = () => {
-    if (!activeBuild) return null;
-    const progress = Math.max(0, Math.min(100, activeBuild.progress || 0));
-    const status = activeBuild.status || 'queued';
-    const steps = [
-      { label: 'Build request received', done: progress >= 5 },
-      { label: 'Mark runner ready', done: progress >= 20 },
-      { label: 'Validate inputs', done: progress >= 20 },
-      { label: 'Build debug APK', done: progress >= 45 },
-      { label: 'Mark APK built', done: progress >= 80 },
-      { label: 'Upload APK to private storage', done: progress >= 100 },
-    ];
-    return <div className="buildprogress panel" role="status" aria-live="polite">
-      <div className="buildprogresshead"><div><div className="eyebrow">LIVE APK BUILD</div><h2>{status === 'completed' ? 'APK ready' : status === 'failed' ? 'Build stopped' : 'Building your APK'}</h2><p>{status === 'completed' ? 'Your private APK is ready to download.' : status === 'failed' ? 'The build could not be completed.' : 'Live progress from GitHub Actions.'}</p></div><strong className="bigprogress">{progress}%</strong></div>
-      <div className="progressrow large"><div className="progressbar"><i style={{ width: `${progress}%` }} /></div></div>
-      <div className="buildsteps">{steps.map((step) => <div className={step.done ? 'buildstep done' : 'buildstep'} key={step.label}><span>{step.done ? '✓' : '○'}</span>{step.label}</div>)}</div>
-      {activeBuild.error_message && <p className="builderror">{activeBuild.error_message}</p>}
-      {status === 'completed' && activeBuild.storage_path && <button className="downloadbtn downloadlarge" onClick={() => downloadApk(activeBuild)} disabled={downloadBusy === activeBuild.id}>{downloadBusy === activeBuild.id ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} Download APK</button>}
-    </div>;
   };
 
   const toggle = (id) => {
@@ -335,44 +175,27 @@ function App() {
       return;
     }
 
-    if (iconSvg.trim()) {
-      try {
-        sanitizeSvg(iconSvg);
-      } catch (err) {
-        showNotice(err.message, 'error');
-        return;
-      }
-    }
-
     setSaving(true);
 
     try {
       let iconUrl = null;
-      let uploadIcon = iconFile;
 
-      if (iconSvg.trim()) {
-        uploadIcon = await svgToPng(iconSvg);
-      }
-
-      if (uploadIcon) {
-        const safeName = iconFile
-          ? iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '-')
-          : 'custom-svg-icon.png';
-
+      if (iconFile) {
+        const safeName = iconFile.name.replace(/[^a-zA-Z0-9._-]/g, '-');
         const path = `${user.id}/${Date.now()}-${safeName}`;
 
         const { error: uploadError } = await supabase.storage
           .from('app-assets')
-          .upload(path, uploadIcon, {
+          .upload(path, iconFile, {
             upsert: false,
-            contentType: iconSvg.trim() ? 'image/png' : iconFile.type
+            contentType: iconFile.type
           });
 
         if (uploadError) throw uploadError;
         iconUrl = path;
       }
 
-      const { data: project, error: saveError } = await supabase
+      const { error: saveError } = await supabase
         .from('projects')
         .insert({
           user_id: user.id,
@@ -380,23 +203,20 @@ function App() {
           package_name: pkg.trim(),
           website_url: website.href,
           icon_url: iconUrl
-        }).select('id').single();
+        });
 
       if (saveError) throw saveError;
-      const { data: build, error: createBuildError } = await supabase.from('builds').insert({ user_id: user.id, project_id: project.id, status: 'queued', progress: 5 }).select('id').single();
-      if (createBuildError) throw createBuildError;
-      setActiveBuildId(build.id);
-      setBuilds((current) => [{ ...build, project_id: project.id, status: 'queued', progress: 5, created_at: new Date().toISOString() }, ...current.filter((item) => item.id !== build.id)]);
+
+      showNotice('Your app setup has been saved. Preparing your APK build…');
 
       const { data, error: buildError } = await supabase.functions.invoke(
         'build-apk',
         {
           body: {
-            build_id: build.id,
             app_name: appName.trim(),
             application_id: pkg.trim(),
             start_url: website.href,
-            icon_path: iconUrl || ''
+            icon_path: iconUrl || ""
           }
         }
       );
@@ -407,7 +227,10 @@ function App() {
         throw new Error(data?.error || 'Unable to start the build.');
       }
 
-      await loadBuilds();
+      showNotice(
+        'Your app setup has been submitted successfully. Your APK build request is in the queue.',
+        'success'
+      );
     } catch (err) {
       showNotice(
         `We couldn't complete your request: ${err.message || 'Please try again.'}`,
@@ -634,7 +457,6 @@ function App() {
                 </button>
               </div>
 
-              {renderBuildProgress()}
               <form className="panel" onSubmit={saveProject}>
                 <div className="paneltitle">
                   <div>
@@ -685,7 +507,7 @@ function App() {
                       : 'M'}
                   </div>
                   <div className="uploadcopy">
-                    <b>{iconSvg.trim() ? 'SVG code icon' : (iconFile?.name || 'Custom app icon')}</b>
+                    <b>{iconFile?.name || 'Custom app icon'}</b>
                     <small>PNG or JPEG · 512 × 512 px recommended</small>
                   </div>
                   <label className="uploadbtn">
@@ -698,45 +520,12 @@ function App() {
                         const file = e.target.files?.[0];
                         if (file) {
                           setIconFile(file);
-                          setIconSvg('');
                           setIconPreview(URL.createObjectURL(file));
                         }
                       }}
                     />
                   </label>
                 </div>
-
-                <label htmlFor="svg-icon-code">Or paste SVG code</label>
-                <textarea
-                  id="svg-icon-code"
-                  className="field"
-                  rows={3}
-                  value={iconSvg}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setIconSvg(value);
-
-                    if (value.trim()) {
-                      setIconFile(null);
-                      try {
-                        const safe = sanitizeSvg(value);
-                        setIconPreview(
-                          'data:image/svg+xml;charset=utf-8,' +
-                          encodeURIComponent(safe)
-                        );
-                      } catch {
-                        setIconPreview('');
-                      }
-                    } else {
-                      setIconPreview('');
-                    }
-                  }}
-                  placeholder="<svg viewBox=&quot;0 0 512 512&quot;>...</svg>"
-                  aria-label="Paste SVG icon code"
-                />
-                <small className="authfoot">
-                  SVG paste karte hi preview dikhega. Safe SVG shapes supported hain.
-                </small>
 
                 <div className="permissionhead">
                   <div>
@@ -831,7 +620,11 @@ function App() {
                   <p>Your generated APK records will appear here.</p>
                 </div>
               </div>
-              {builds.length === 0 ? <div className="panel empty"><History size={32} /><h2>No builds yet</h2><p>Your build records will appear here after you submit an APK.</p></div> : <div className="buildlist">{builds.map((build) => { const status = build.status || 'queued'; const label = status === 'completed' ? 'Ready to download' : status === 'failed' ? 'Build failed' : status === 'uploading' ? 'Uploading APK' : status === 'building' ? 'Building APK' : 'Queued'; return <article className="buildcard" key={build.id}><div className="buildtop"><div><b>{build.project_id ? 'Android APK build' : 'APK build'}</b><small>{new Date(build.created_at).toLocaleString()}</small></div><span className={`buildstatus ${status}`}>{label}</span></div><div className="progressrow"><div className="progressbar"><i style={{ width: `${Math.max(0, Math.min(100, build.progress || 0))}%` }} /></div><strong>{build.progress || 0}%</strong></div>{build.error_message && <p className="builderror">{build.error_message}</p>}{status === 'completed' && build.storage_path && <button className="downloadbtn" onClick={() => downloadApk(build)} disabled={downloadBusy === build.id}>{downloadBusy === build.id ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />} Download private APK</button>}</article>; })}</div>}
+              <div className="panel empty">
+                <History size={32} />
+                <h2>No builds yet</h2>
+                <p>Your build records will appear here when build history is connected.</p>
+              </div>
             </>
           ) : tab === 'settings' ? (
             <>
