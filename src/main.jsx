@@ -177,7 +177,10 @@ function App() {
   const loadBuilds = async () => {
     if (!supabase || !user) return;
     const { data, error } = await supabase.from('builds').select('id,project_id,status,progress,apk_url,storage_path,error_message,created_at,started_at,completed_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(20);
-    if (!error) setBuilds(data || []);
+    if (!error) {
+      setBuilds(data || []);
+      setActiveBuildId((current) => current || data?.find((build) => ['queued', 'building', 'uploading'].includes(build.status))?.id || null);
+    }
   };
 
   useEffect(() => { if (user) loadBuilds(); else setBuilds([]); }, [user, tab]);
@@ -203,6 +206,28 @@ function App() {
   const showNotice = (message, type = 'info') => {
     setNotice(message);
     setNoticeType(type);
+  };
+
+  const activeBuild = builds.find((build) => build.id === activeBuildId);
+  const renderBuildProgress = () => {
+    if (!activeBuild) return null;
+    const progress = Math.max(0, Math.min(100, activeBuild.progress || 0));
+    const status = activeBuild.status || 'queued';
+    const steps = [
+      { label: 'Build request received', done: progress >= 5 },
+      { label: 'Mark runner ready', done: progress >= 20 },
+      { label: 'Validate inputs', done: progress >= 20 },
+      { label: 'Build debug APK', done: progress >= 45 },
+      { label: 'Mark APK built', done: progress >= 80 },
+      { label: 'Upload APK to private storage', done: progress >= 100 },
+    ];
+    return <div className="buildprogress panel" role="status" aria-live="polite">
+      <div className="buildprogresshead"><div><div className="eyebrow">LIVE APK BUILD</div><h2>{status === 'completed' ? 'APK ready' : status === 'failed' ? 'Build stopped' : 'Building your APK'}</h2><p>{status === 'completed' ? 'Your private APK is ready to download.' : status === 'failed' ? 'The build could not be completed.' : 'Live progress from GitHub Actions.'}</p></div><strong className="bigprogress">{progress}%</strong></div>
+      <div className="progressrow large"><div className="progressbar"><i style={{ width: `${progress}%` }} /></div></div>
+      <div className="buildsteps">{steps.map((step) => <div className={step.done ? 'buildstep done' : 'buildstep'} key={step.label}><span>{step.done ? '✓' : '○'}</span>{step.label}</div>)}</div>
+      {activeBuild.error_message && <p className="builderror">{activeBuild.error_message}</p>}
+      {status === 'completed' && activeBuild.storage_path && <button className="downloadbtn downloadlarge" onClick={() => downloadApk(activeBuild)} disabled={downloadBusy === activeBuild.id}>{downloadBusy === activeBuild.id ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} Download APK</button>}
+    </div>;
   };
 
   const toggle = (id) => {
@@ -361,8 +386,7 @@ function App() {
       const { data: build, error: createBuildError } = await supabase.from('builds').insert({ user_id: user.id, project_id: project.id, status: 'queued', progress: 5 }).select('id').single();
       if (createBuildError) throw createBuildError;
       setActiveBuildId(build.id);
-      await loadBuilds();
-      showNotice('Your app setup is saved. APK build is queued and live progress will appear below.');
+      setBuilds((current) => [{ ...build, project_id: project.id, status: 'queued', progress: 5, created_at: new Date().toISOString() }, ...current.filter((item) => item.id !== build.id)]);
 
       const { data, error: buildError } = await supabase.functions.invoke(
         'build-apk',
@@ -384,7 +408,6 @@ function App() {
       }
 
       await loadBuilds();
-      showNotice('Build request sent. Track the genuine workflow progress in Build History.', 'success');
     } catch (err) {
       showNotice(
         `We couldn't complete your request: ${err.message || 'Please try again.'}`,
@@ -611,6 +634,7 @@ function App() {
                 </button>
               </div>
 
+              {renderBuildProgress()}
               <form className="panel" onSubmit={saveProject}>
                 <div className="paneltitle">
                   <div>
