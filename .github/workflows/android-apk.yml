@@ -1,3 +1,4 @@
+
 name: Build MyRemote Android APK
 
 on:
@@ -20,6 +21,10 @@ on:
         type: string
       icon_url:
         description: 'Temporary app icon URL'
+        required: false
+        type: string
+      build_id:
+        description: 'MyRemote build record ID'
         required: false
         type: string
 
@@ -51,6 +56,21 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Update build status - Preparing
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [[ -n "$BUILD_ID" ]]; then
+            curl --fail --silent --show-error \
+              -X PATCH "$SUPABASE_URL/rest/v1/builds?id=eq.$BUILD_ID" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"status\":\"building\",\"progress\":5,\"progress_stage\":\"Preparing\",\"github_run_id\":\"$GITHUB_RUN_ID\",\"github_run_attempt\":$GITHUB_RUN_ATTEMPT}"
+          fi
+
       - name: Validate inputs
         env:
           APP_NAME: ${{ inputs.app_name }}
@@ -67,8 +87,8 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$APP_NAME" ]]; then
-            echo 'app_name cannot be empty.' >&2
+          if [[ -z "$APP_NAME" || ${#APP_NAME} -gt 50 ]]; then
+            echo 'app_name must contain 1 to 50 characters.' >&2
             exit 1
           fi
 
@@ -95,7 +115,6 @@ jobs:
           python3 - <<'PY'
           from PIL import Image, ImageDraw, ImageFont
           from pathlib import Path
-          import os
 
           source = Path("/tmp/myremote-icon")
           output = Path("android-webview-template/app/src/main/res")
@@ -122,17 +141,12 @@ jobs:
               tw, th = box[2] - box[0], box[3] - box[1]
               draw.text(
                   ((1024 - tw) / 2 - box[0], (1024 - th) / 2 - box[1]),
-                  "M",
-                  fill="white",
-                  font=font
+                  "M", fill="white", font=font
               )
 
           densities = {
-              "mdpi": 48,
-              "hdpi": 72,
-              "xhdpi": 96,
-              "xxhdpi": 144,
-              "xxxhdpi": 192,
+              "mdpi": 48, "hdpi": 72, "xhdpi": 96,
+              "xxhdpi": 144, "xxxhdpi": 192,
           }
 
           for density, size in densities.items():
@@ -144,6 +158,21 @@ jobs:
 
           print("Android launcher icons generated successfully.")
           PY
+
+      - name: Update build status - Building APK
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [[ -n "$BUILD_ID" ]]; then
+            curl --fail --silent --show-error \
+              -X PATCH "$SUPABASE_URL/rest/v1/builds?id=eq.$BUILD_ID" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"status":"building","progress":30,"progress_stage":"Building APK"}'
+          fi
 
       - name: Build debug APK
         working-directory: android-webview-template
@@ -157,6 +186,56 @@ jobs:
           -PAPPLICATION_ID="$APPLICATION_ID"
           -PSTART_URL="$START_URL"
 
+      - name: Update build status - APK built
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [[ -n "$BUILD_ID" ]]; then
+            curl --fail --silent --show-error \
+              -X PATCH "$SUPABASE_URL/rest/v1/builds?id=eq.$BUILD_ID" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"status":"uploading","progress":80,"progress_stage":"Uploading APK"}'
+          fi
+
+      - name: Upload APK to private Supabase Storage
+        id: private_upload
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          APK_FILE=$(find android-webview-template/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+
+          if [[ -z "$APK_FILE" ]]; then
+            echo "APK file not found."
+            exit 1
+          fi
+
+          STORAGE_PATH="builds/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
+
+          curl --fail --silent --show-error \
+            -X POST "$SUPABASE_URL/storage/v1/object/apk-builds/$STORAGE_PATH" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            -H "x-upsert: true" \
+            --data-binary "@$APK_FILE"
+
+          echo "storage_path=$STORAGE_PATH" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "$BUILD_ID" ]]; then
+            curl --fail --silent --show-error \
+              -X PATCH "$SUPABASE_URL/rest/v1/builds?id=eq.$BUILD_ID" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"status\":\"completed\",\"progress\":100,\"progress_stage\":\"Completed\",\"apk_path\":\"$STORAGE_PATH\",\"storage_path\":\"$STORAGE_PATH\",\"completed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -164,3 +243,19 @@ jobs:
           path: android-webview-template/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 7
+
+      - name: Mark build failed
+        if: failure()
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [[ -n "$BUILD_ID" ]]; then
+            curl --silent --show-error \
+              -X PATCH "$SUPABASE_URL/rest/v1/builds?id=eq.$BUILD_ID" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{"status":"failed","progress_stage":"Build failed","error_message":"The APK build or upload failed."}'
+          fi
