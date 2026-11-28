@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -44,6 +43,8 @@ function App() {
   const [iconFile, setIconFile] = useState(null);
   const [iconPreview, setIconPreview] = useState('');
   const [saving, setSaving] = useState(false);
+  const [activeBuild, setActiveBuild] = useState(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -195,7 +196,7 @@ function App() {
         iconUrl = path;
       }
 
-      const { error: saveError } = await supabase
+      const { data: savedProject, error: saveError } = await supabase
         .from('projects')
         .insert({
           user_id: user.id,
@@ -203,7 +204,9 @@ function App() {
           package_name: pkg.trim(),
           website_url: website.href,
           icon_url: iconUrl
-        });
+        })
+        .select('id')
+        .single();
 
       if (saveError) throw saveError;
 
@@ -216,7 +219,8 @@ function App() {
             app_name: appName.trim(),
             application_id: pkg.trim(),
             start_url: website.href,
-            icon_path: iconUrl || ""
+            icon_path: iconUrl || "",
+            project_id: savedProject.id
           }
         }
       );
@@ -227,8 +231,21 @@ function App() {
         throw new Error(data?.error || 'Unable to start the build.');
       }
 
+      if (!data?.build_id) {
+        throw new Error('The build service did not return a build ID.');
+      }
+
+      setActiveBuild({
+        id: data.build_id,
+        status: data.status || 'queued',
+        progress: 0,
+        progress_stage: 'Queued',
+        apk_path: null,
+        error_message: null
+      });
+
       showNotice(
-        'Your app setup has been submitted successfully. Your APK build request is in the queue.',
+        'Your APK build has been queued. Progress will appear below.',
         'success'
       );
     } catch (err) {
@@ -238,6 +255,87 @@ function App() {
       );
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Restore the latest build when the user opens or refreshes the builder.
+  useEffect(() => {
+    if (!supabase || !user) {
+      setActiveBuild(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadLatestBuild = async () => {
+      const { data, error } = await supabase
+        .from('builds')
+        .select('id,status,progress,progress_stage,apk_path,error_message')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!cancelled && !error && data) {
+        setActiveBuild(data);
+      }
+    };
+
+    loadLatestBuild();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  // Poll only the current build; stop automatically when it completes or fails.
+  useEffect(() => {
+    if (!supabase || !user || !activeBuild?.id) return;
+    if (['completed', 'failed'].includes(activeBuild.status)) return;
+
+    let cancelled = false;
+
+    const pollBuild = async () => {
+      const { data, error } = await supabase
+        .from('builds')
+        .select('id,status,progress,progress_stage,apk_path,error_message')
+        .eq('id', activeBuild.id)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (!cancelled && !error && data) {
+        setActiveBuild(data);
+      }
+    };
+
+    pollBuild();
+    const timer = window.setInterval(pollBuild, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [user, activeBuild?.id, activeBuild?.status]);
+
+  const downloadApk = async () => {
+    if (!activeBuild?.apk_path || !supabase) return;
+
+    setDownloadBusy(true);
+
+    try {
+      const { data, error } = await supabase.storage
+        .from('apk-builds')
+        .createSignedUrl(activeBuild.apk_path, 3600, { download: true });
+
+      if (error) throw error;
+      window.location.assign(data.signedUrl);
+    } catch (err) {
+      showNotice(
+        err.message || 'Could not prepare the APK download.',
+        'error'
+      );
+    } finally {
+      setDownloadBusy(false);
     }
   };
 
@@ -577,11 +675,72 @@ function App() {
                   </div>
                 )}
 
-                <button className="primary" type="submit" disabled={saving}>
-                  {saving && <LoaderCircle className="spin" size={17} />}
-                  {saving ? 'Submitting your app…' : 'Create Android App'}
-                  <ArrowRight size={17} />
-                </button>
+                {activeBuild?.status === 'completed' ? (
+                  <div className="buildresult">
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={downloadApk}
+                      disabled={downloadBusy || !activeBuild.apk_path}
+                    >
+                      {downloadBusy && <LoaderCircle className="spin" size={17} />}
+                      {downloadBusy ? 'Preparing download…' : 'Download APK'}
+                      <ArrowRight size={17} />
+                    </button>
+                    <button
+                      className="secondary"
+                      type="button"
+                      onClick={() => setActiveBuild(null)}
+                    >
+                      Create another app
+                    </button>
+                  </div>
+                ) : activeBuild && ['queued', 'building', 'uploading'].includes(activeBuild.status) ? (
+                  <div className="panel buildprogress" role="status" aria-live="polite">
+                    <div className="paneltitle">
+                      <div>
+                        <h2>{activeBuild.progress_stage || 'Build queued'}</h2>
+                        <p>Your APK is being prepared. You can keep this page open.</p>
+                      </div>
+                      <b>{Math.max(0, Math.min(100, Number(activeBuild.progress) || 0))}%</b>
+                    </div>
+                    <div
+                      style={{
+                        height: '9px',
+                        background: 'rgba(128,128,128,0.25)',
+                        borderRadius: '20px',
+                        overflow: 'hidden'
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.max(0, Math.min(100, Number(activeBuild.progress) || 0))}%`,
+                          height: '100%',
+                          background: '#f59e0b',
+                          transition: 'width 0.3s ease'
+                        }}
+                      />
+                    </div>
+                    <small>Progress updates automatically every few seconds.</small>
+                  </div>
+                ) : activeBuild?.status === 'failed' ? (
+                  <div className="buildresult">
+                    <div className="notice" role="alert">
+                      {activeBuild.error_message || 'APK build failed. Please try again.'}
+                    </div>
+                    <button className="primary" type="submit" disabled={saving}>
+                      {saving && <LoaderCircle className="spin" size={17} />}
+                      {saving ? 'Submitting your app…' : 'Try Again'}
+                      <ArrowRight size={17} />
+                    </button>
+                  </div>
+                ) : (
+                  <button className="primary" type="submit" disabled={saving}>
+                    {saving && <LoaderCircle className="spin" size={17} />}
+                    {saving ? 'Submitting your app…' : 'Create Android App'}
+                    <ArrowRight size={17} />
+                  </button>
+                )}
 
                 {notice && (
                   <div className="notice" role="status">
